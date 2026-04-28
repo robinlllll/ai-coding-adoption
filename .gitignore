@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+*.tmp
+*.bak
+
+# Don't push raw 23MB+ JSONL — only the small aggregated data/latest.json goes public
+# (raw JSONL stays on local PC, build.py reads it locally and produces latest.json)
+*.jsonl

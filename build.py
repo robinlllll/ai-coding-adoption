@@ -145,12 +145,16 @@ def _aggregate_openrouter() -> dict:
         daily[d][author] += (r.get("tokens_completion", 0) or 0) + (
             r.get("tokens_prompt", 0) or 0
         )
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
 
     all_dates = sorted(daily.keys())
     today_iso = _date.today().isoformat()
-    # Drop today's date — always partial since scraper runs early UTC
-    full_dates = [d for d in all_dates if d < today_iso][-90:]
+    # Drop today AND yesterday — OpenRouter back-fills BYOK / log-aggregation
+    # data over 7-14 days, so the 2 most recent days routinely undercount.
+    # Showing them on a public chart would imply a fake decline. Cutoff
+    # = today - 2 days. (Anything dropped here will appear in tomorrow's run.)
+    cutoff_iso = (_date.today() - _td(days=2)).isoformat()
+    full_dates = [d for d in all_dates if d <= cutoff_iso][-90:]
 
     # Anomaly detection: if any of last 4 days is < 40% of prior 7-day median,
     # mark it as suspect (likely scraper regression).
@@ -194,6 +198,9 @@ def _aggregate_openrouter() -> dict:
         sum(v for k, v in daily[d].items() if k not in tracked) for d in chart_dates
     ]
     latest_total = sum(daily[latest_clean].values()) if latest_clean else 0
+    # Recently-dropped dates (today + yesterday): present in raw data but
+    # excluded from chart because OpenRouter is still back-filling them.
+    recently_dropped = [d for d in all_dates if d > cutoff_iso]
     return {
         "labels": chart_dates,
         "series": series,
@@ -201,8 +208,8 @@ def _aggregate_openrouter() -> dict:
         "today_total_t": latest_total / 1e12,
         "providers_today": [(a, v / 1e9) for a, v in top_authors],
         "suspect": suspect,
-        "dropped_dates": sorted(suspect_dates)
-        + ([today_iso] if today_iso in all_dates else []),
+        "dropped_dates": sorted(suspect_dates) + recently_dropped,
+        "recently_dropped": recently_dropped,
     }
 
 
@@ -644,25 +651,35 @@ tool_calls           ← agentic 工作量</div></dd>
             return ""
         return "up" if curr >= prev else "down"
 
-    # Build warning banner if scraper anomalies / dropped dates detected
+    # Build warning banner. Two levels:
+    # (1) ALWAYS show "data freshness" line: the chart cuts off at today-2.
+    # (2) If anomaly detector flagged a suspect day, show that prominently.
     suspect = o.get("suspect", [])
-    dropped = o.get("dropped_dates", [])
+    recently_dropped = o.get("recently_dropped", [])
     banner_html = ""
-    if suspect or dropped:
+    if suspect or recently_dropped:
         items = []
         for s in suspect:
             items.append(
                 f"<li><b>{s['date']}</b>: 实际 <code>{s['total_b']:.0f}B tokens</code> · "
                 f"前 7 天中位数 <code>{s['median_b']:.0f}B</code> · "
-                f"比值 {s['total_b'] / s['median_b'] * 100:.0f}% — 视为采集不全已从图中剔除</li>"
+                f"比值 {s['total_b'] / s['median_b'] * 100:.0f}% — 采集不全，已剔除</li>"
             )
-        if dropped and not suspect:
-            items.append(f"<li>当日数据（{dropped[0]} UTC）尚未完整，已从图中排除</li>")
+        if recently_dropped and not suspect:
+            cutoff_d = recently_dropped[0]
+            last_d = recently_dropped[-1]
+            items.append(
+                f"<li><b>{cutoff_d} ~ {last_d}</b>："
+                "OpenRouter 在前 7-14 天会持续回填 BYOK / 日志数据，"
+                "最近 2 天数字尚未结算 — 默认从图表剔除以避免误显"
+                "下行趋势</li>"
+            )
         banner_html = (
             '<div class="banner-warn">'
-            "<h3>⚠ OpenRouter 数据完整性提示</h3>"
-            "<div>检测到以下日期 token 总量异常偏低（scraper 抓取不完整），"
-            "已从图表中剔除以避免误读：</div>"
+            "<h3>⚠ 数据新鲜度声明</h3>"
+            "<div>所有日级图表只显示<b>截至前天</b>的数据（today − 2）。"
+            "今天 + 昨天因 OpenRouter 后台仍在回填，<b>不展示</b>以避免"
+            "误读：</div>"
             f"<ul>{''.join(items)}</ul>"
             "</div>"
         )

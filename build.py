@@ -168,8 +168,12 @@ def _aggregate_openrouter() -> dict:
     cutoff_iso = (_date.today() - _td(days=2)).isoformat()
     full_dates = [d for d in all_dates if d <= cutoff_iso][-90:]
 
-    # Anomaly detection: if any of last 4 days is < 40% of prior 7-day median,
-    # mark it as suspect (likely scraper regression).
+    # Anomaly detection: if any of last 4 days is < 75% of prior 7-day median,
+    # mark it as suspect (likely scraper regression). Threshold tightened from
+    # 40% on 2026-05-04 — the prior threshold missed a 38% drop caused by
+    # top_n=300 truncation in the scraper, which silently dropped 113 long-tail
+    # models. 75% catches that and similar future regressions while still
+    # allowing real day-of-week swings (e.g., weekend dips ~80% of midweek).
     daily_totals = [(d, sum(daily[d].values())) for d in full_dates]
     suspect: list[dict] = []
     if len(daily_totals) >= 11:
@@ -178,7 +182,7 @@ def _aggregate_openrouter() -> dict:
             window = sorted(x[1] for x in daily_totals[max(0, i - 7) : i])
             if window:
                 med = window[len(window) // 2]
-                if med > 0 and t / med < 0.4:
+                if med > 0 and t / med < 0.75:
                     suspect.append(
                         {"date": d, "total_b": t / 1e9, "median_b": med / 1e9}
                     )

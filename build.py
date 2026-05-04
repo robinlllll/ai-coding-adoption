@@ -16,6 +16,7 @@ Run after each tracker finishes. Idempotent.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -229,6 +230,120 @@ def _aggregate_openrouter() -> dict:
     }
 
 
+_OR_PUSH_RE = re.compile(r'self\.__next_f\.push\(\[\d+,\s*"(.*?)"\]\)', re.DOTALL)
+
+
+def _or_extract_bracketed(text: str, start: int, op: str = "{", cl: str = "}") -> str:
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(start, len(text)):
+        ch = text[j]
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == op:
+            depth += 1
+        elif ch == cl:
+            depth -= 1
+            if depth == 0:
+                return text[start : j + 1]
+    return ""
+
+
+def _aggregate_or_leaderboard(top_n: int = 12) -> dict:
+    """Live-fetch openrouter.ai/rankings and parse the top-N models.
+
+    The /rankings page embeds `rankingData` arrays in Next.js Flight chunks.
+    OpenRouter publishes weekly-rolling cumulative tokens per (model, variant)
+    stamped with one date. We use the latest stamped date as the "as_of" and
+    return the top-N models by token volume.
+
+    Self-contained — does not import from ~/scripts/.
+    Returns {} on any failure (network, parse) so build.py never blocks on it.
+    """
+    try:
+        import requests as _req
+
+        r = _req.get(
+            "https://openrouter.ai/rankings",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0 Safari/537.36"
+                ),
+                "Accept": "text/html",
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception:
+        return {}
+    by_key: dict[tuple, dict] = {}
+    for raw in _OR_PUSH_RE.findall(html):
+        try:
+            u = raw.encode().decode("unicode_escape")
+        except UnicodeDecodeError:
+            continue
+        m = re.search(r'"rankingData":\[', u)
+        if not m:
+            continue
+        arr = _or_extract_bracketed(u, m.end() - 1, "[", "]")
+        if not arr:
+            continue
+        try:
+            data = json.loads(arr)
+        except json.JSONDecodeError:
+            continue
+        for row in data:
+            slug = row.get("model_permaslug") or ""
+            variant = row.get("variant") or ""
+            d = (row.get("date") or "")[:10]
+            tok = int(row.get("total_completion_tokens") or 0) + int(
+                row.get("total_prompt_tokens") or 0
+            )
+            if not slug or not d:
+                continue
+            key = (slug, variant)
+            existing = by_key.get(key)
+            if existing is None or tok > existing["tokens"]:
+                by_key[key] = {
+                    "permaslug": slug,
+                    "variant": variant,
+                    "tokens": tok,
+                    "date": d,
+                    "author": slug.split("/", 1)[0],
+                }
+    if not by_key:
+        return {}
+    rows = sorted(by_key.values(), key=lambda r: -r["tokens"])
+    as_of = max(r["date"] for r in rows)
+    top = rows[:top_n]
+    return {
+        "as_of": as_of,
+        "note": "weekly cumulative · OpenRouter /rankings",
+        "models": [
+            {
+                "permaslug": r["permaslug"],
+                "variant": r["variant"],
+                "author": r["author"],
+                "tokens_b": r["tokens"] / 1e9,
+            }
+            for r in top
+        ],
+    }
+
+
 def _aggregate_github_stars() -> dict:
     """GitHub star history for anthropics/claude-code vs openai/codex.
 
@@ -274,6 +389,7 @@ def build():
     commits = _aggregate_commits()
     npm = _aggregate_npm()
     orouter = _aggregate_openrouter()
+    or_leaderboard = _aggregate_or_leaderboard(top_n=12)
     gh_stars = _aggregate_github_stars()
 
     payload = {
@@ -281,6 +397,7 @@ def build():
         "commits": commits,
         "npm": npm,
         "openrouter": orouter,
+        "or_leaderboard": or_leaderboard,
         "gh_stars": gh_stars,
     }
     (DATA_OUT / "latest.json").write_text(
@@ -483,10 +600,19 @@ __BANNER__
 </section>
 
 <section class="section">
+  <h3 class="section-title">OpenRouter 周排行榜（实时镜像）</h3>
+  <div class="chart-card">
+    <h3>Top 模型 · 周累计 token（口径与 <a href="https://openrouter.ai/rankings" target="_blank" style="color:var(--accent)">openrouter.ai/rankings</a> 一致）</h3>
+    <p class="axis-note"><b>每次构建从 OpenRouter 实时拉取</b>。OpenRouter 把"周累计 token"打上一个日期戳（通常是昨天 / 前天），代表过去 7 天的累积用量。下面表格直接镜像该口径，<b>避免与堆叠图日数据混淆</b>。</p>
+    <div style="overflow-x:auto">__OR_LEADERBOARD__</div>
+  </div>
+</section>
+
+<section class="section">
   <h3 class="section-title">主图 · OpenRouter 提供商 token 份额</h3>
   <div class="chart-card">
     <h3>各 AI 提供商每日 token 用量（堆叠面积图）</h3>
-    <p class="axis-note"><b>单轴</b>（10 亿 token/天）—— 堆叠展示份额变化。X 轴为日期，最近 90 天。</p>
+    <p class="axis-note"><b>单轴</b>（10 亿 token/天）—— 堆叠展示份额变化。X 轴为日期，最近 90 天。<b>注意</b>：本图基于 per-model 详情页抓取的 daily 数据，主要捕获 <code>standard</code> 变体。<code>free</code> 变体（如 Tencent Hy3 Preview 在 free tier 的高流量）在此图中不可见，请配合上方周排行榜查看完整对比。</p>
     <div class="chart-box"><canvas id="chartOR"></canvas></div>
   </div>
 </section>
@@ -820,8 +946,73 @@ tool_calls           ← agentic 工作量</div></dd>
         gh_delta_text = "首次运行"
         gh_totals_text = "需 ~/.claude/data/github_stars.jsonl 数据"
 
+    # OpenRouter weekly leaderboard table (mirrors openrouter.ai/rankings).
+    lb = p.get("or_leaderboard") or {}
+    AUTHOR_COLORS = {
+        "anthropic": "var(--claude)",
+        "openai": "#10a37f",
+        "google": "#4285f4",
+        "deepseek": "#6e40c9",
+        "moonshotai": "#fbbf24",
+        "tencent": "#06b6d4",
+        "x-ai": "#e5e7eb",
+        "qwen": "#f97316",
+        "minimax": "#ec4899",
+        "z-ai": "#22d3ee",
+        "stepfun": "#84cc16",
+        "meta-llama": "#0668e1",
+    }
+    if lb.get("models"):
+        rows_html = []
+        max_t = max(m["tokens_b"] for m in lb["models"]) or 1
+        for i, m in enumerate(lb["models"], 1):
+            color = AUTHOR_COLORS.get(m["author"], "var(--muted)")
+            bar_pct = m["tokens_b"] / max_t * 100
+            t_label = (
+                f"{m['tokens_b'] / 1000:.2f}T"
+                if m["tokens_b"] >= 1000
+                else f"{m['tokens_b']:.0f}B"
+            )
+            v_tag = (
+                f' <span style="color:var(--muted);font-size:11px">[{m["variant"]}]</span>'
+                if m["variant"] not in ("standard", "")
+                else ""
+            )
+            rows_html.append(
+                f'<tr><td style="color:var(--muted);width:30px">{i}</td>'
+                f'<td><b style="color:{color}">{m["permaslug"]}</b>{v_tag}</td>'
+                f'<td class="r mono" style="white-space:nowrap">{t_label}</td>'
+                f'<td style="width:35%">'
+                f'<div style="background:#334155;border-radius:3px;height:14px;overflow:hidden">'
+                f'<div style="height:14px;background:{color};width:{bar_pct:.1f}%;border-radius:3px"></div>'
+                f"</div></td></tr>"
+            )
+        or_lb_html = (
+            f'<p style="font-size:12px;color:var(--muted);margin:0 0 10px">'
+            f'快照日期 <b style="color:var(--text)">{lb.get("as_of", "—")}</b> · '
+            f"{lb.get('note', '')}</p>"
+            '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+            '<thead><tr><th style="text-align:left;padding:6px;color:var(--muted);'
+            'font-size:11px;text-transform:uppercase">#</th>'
+            '<th style="text-align:left;padding:6px;color:var(--muted);font-size:11px;'
+            'text-transform:uppercase">Model</th>'
+            '<th style="text-align:right;padding:6px;color:var(--muted);font-size:11px;'
+            'text-transform:uppercase">Weekly Tokens</th>'
+            '<th style="padding:6px;color:var(--muted);font-size:11px;'
+            'text-transform:uppercase">Distribution</th></tr></thead><tbody>'
+            + "".join(rows_html)
+            + "</tbody></table>"
+        )
+    else:
+        or_lb_html = (
+            '<p style="color:var(--muted);font-size:13px;padding:20px 0">'
+            "OpenRouter /rankings fetch failed at build time — leaderboard unavailable. "
+            "Daily chart below still reflects per-model-page data.</p>"
+        )
+
     replacements = {
         "__BANNER__": banner_html,
+        "__OR_LEADERBOARD__": or_lb_html,
         "__SDK_RATIO__": sdk_ratio_text,
         "__GH_DELTA__": gh_delta_text,
         "__GH_TOTALS__": gh_totals_text,

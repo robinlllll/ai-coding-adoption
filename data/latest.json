@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-04T18:06:19.632548+00:00",
+  "generated_at": "2026-05-04T18:27:25.451737+00:00",
   "commits": {
     "labels": [
       "2025-02-23",
@@ -1675,6 +1675,84 @@
     "recently_dropped": [
       "2026-05-03",
       "2026-05-04"
+    ]
+  },
+  "or_leaderboard": {
+    "as_of": "2026-05-03",
+    "note": "weekly cumulative · OpenRouter /rankings",
+    "models": [
+      {
+        "permaslug": "tencent/hy3-preview-20260421",
+        "variant": "free",
+        "author": "tencent",
+        "tokens_b": 3034.887257834
+      },
+      {
+        "permaslug": "moonshotai/kimi-k2.6-20260420",
+        "variant": "standard",
+        "author": "moonshotai",
+        "tokens_b": 1815.561993981
+      },
+      {
+        "permaslug": "anthropic/claude-4.6-sonnet-20260217",
+        "variant": "standard",
+        "author": "anthropic",
+        "tokens_b": 1346.371084887
+      },
+      {
+        "permaslug": "google/gemini-3-flash-preview-20251217",
+        "variant": "standard",
+        "author": "google",
+        "tokens_b": 972.564901541
+      },
+      {
+        "permaslug": "anthropic/claude-4.7-opus-20260416",
+        "variant": "standard",
+        "author": "anthropic",
+        "tokens_b": 935.043078486
+      },
+      {
+        "permaslug": "deepseek/deepseek-v3.2-20251201",
+        "variant": "standard",
+        "author": "deepseek",
+        "tokens_b": 907.390616939
+      },
+      {
+        "permaslug": "stepfun/step-3.5-flash",
+        "variant": "standard",
+        "author": "stepfun",
+        "tokens_b": 751.83691523
+      },
+      {
+        "permaslug": "minimax/minimax-m2.7-20260318",
+        "variant": "standard",
+        "author": "minimax",
+        "tokens_b": 729.151777103
+      },
+      {
+        "permaslug": "deepseek/deepseek-v4-flash-20260423",
+        "variant": "standard",
+        "author": "deepseek",
+        "tokens_b": 703.926874373
+      },
+      {
+        "permaslug": "x-ai/grok-4.1-fast",
+        "variant": "standard",
+        "author": "x-ai",
+        "tokens_b": 646.285059402
+      },
+      {
+        "permaslug": "google/gemini-2.5-flash",
+        "variant": "standard",
+        "author": "google",
+        "tokens_b": 614.263807794
+      },
+      {
+        "permaslug": "google/gemini-2.5-flash-lite",
+        "variant": "standard",
+        "author": "google",
+        "tokens_b": 608.032530049
+      }
     ]
   },
   "gh_stars": {

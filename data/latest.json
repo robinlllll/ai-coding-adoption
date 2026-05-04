@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-04T06:30:05.771608+00:00",
+  "generated_at": "2026-05-04T15:17:30.116423+00:00",
   "commits": {
     "labels": [
       "2025-02-23",
@@ -800,7 +800,9 @@
       "npm_anthropic-sdk": 13388288,
       "npm_openai-codex": 3148947,
       "npm_openai-sdk": 17121279
-    }
+    },
+    "codex_regime_break": "2026-04-30",
+    "codex_regime_post_indices": []
   },
   "openrouter": {
     "labels": [
@@ -1674,5 +1676,17 @@
       "2026-05-03",
       "2026-05-04"
     ]
+  },
+  "gh_stars": {
+    "Claude Code": {
+      "stars": 120291,
+      "delta_7d": null,
+      "as_of": "2026-05-04"
+    },
+    "Codex": {
+      "stars": 79900,
+      "delta_7d": null,
+      "as_of": "2026-05-04"
+    }
   }
 }

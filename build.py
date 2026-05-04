@@ -18,13 +18,20 @@ from __future__ import annotations
 import json
 import shutil
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SITE = Path(__file__).resolve().parent
 DATA_OUT = SITE / "data"
 DASH_OUT = SITE / "dashboards"
 T = Path.home() / ".claude" / "data" / "trackers"
+GH_STARS_FILE = Path.home() / ".claude" / "data" / "github_stars.jsonl"
+
+# 2026-04-30: @openai/codex switched to per-platform binary distribution
+# (79.4MB tarball, republished multiple times daily). npm/range counts before
+# and after this date are NOT apples-to-apples; the chart line passes through
+# the boundary but downstream UIs annotate it.
+CODEX_REGIME_BREAK = "2026-04-30"
 
 
 def _load_jsonl(p: Path) -> list[dict]:
@@ -104,6 +111,9 @@ def _aggregate_npm() -> dict:
     series = {k: [r.get(k) or 0 for r in rows] for k in keys}
     latest = rows[-1] if rows else {}
     prev = rows[-2] if len(rows) >= 2 else {}
+    # Mark which weeks are affected by the @openai/codex regime break (4/30).
+    # Any week whose end date is >= the boundary is post-shift.
+    codex_regime_post = [i for i, lab in enumerate(labels) if lab >= CODEX_REGIME_BREAK]
     return {
         "labels": labels,
         "series": series,
@@ -113,6 +123,8 @@ def _aggregate_npm() -> dict:
             "week_end": latest.get("week_end"),
         },
         "prev": {k: prev.get(k) for k in keys},
+        "codex_regime_break": CODEX_REGIME_BREAK,
+        "codex_regime_post_indices": codex_regime_post,
     }
 
 
@@ -213,6 +225,44 @@ def _aggregate_openrouter() -> dict:
     }
 
 
+def _aggregate_github_stars() -> dict:
+    """GitHub star history for anthropics/claude-code vs openai/codex.
+
+    Source: ~/.claude/data/github_stars.jsonl (populated daily by
+    vscode_tracker_dashboard.py). Returns latest counts and 7-day delta.
+    Returns empty dict if file does not exist or has < 2 days of data.
+    """
+    if not GH_STARS_FILE.exists():
+        return {}
+    rows = _load_jsonl(GH_STARS_FILE)
+    if not rows:
+        return {}
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        if r.get("name") and r.get("date"):
+            by_name[r["name"]].append(r)
+    out: dict[str, dict] = {}
+    for name, entries in by_name.items():
+        entries.sort(key=lambda e: e["date"])
+        latest = entries[-1]
+        latest_dt = datetime.fromisoformat(latest["date"])
+        target = (latest_dt - timedelta(days=7)).date().isoformat()
+        prior = None
+        for e in reversed(entries[:-1]):
+            if e["date"] <= target:
+                prior = e
+                break
+        delta = None
+        if prior is not None:
+            delta = latest.get("stars", 0) - prior.get("stars", 0)
+        out[name] = {
+            "stars": latest.get("stars", 0),
+            "delta_7d": delta,
+            "as_of": latest["date"],
+        }
+    return out
+
+
 def build():
     DATA_OUT.mkdir(parents=True, exist_ok=True)
     DASH_OUT.mkdir(parents=True, exist_ok=True)
@@ -220,12 +270,14 @@ def build():
     commits = _aggregate_commits()
     npm = _aggregate_npm()
     orouter = _aggregate_openrouter()
+    gh_stars = _aggregate_github_stars()
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "commits": commits,
         "npm": npm,
         "openrouter": orouter,
+        "gh_stars": gh_stars,
     }
     (DATA_OUT / "latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -292,6 +344,7 @@ def _render_index(p: dict) -> str:
 <meta name="description" content="每日跟踪 Claude Code / Codex / Cursor / Copilot 等 AI Coding 工具的采用度信号：GitHub commits、npm/PyPI 下载、OpenRouter token 用量">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='2' y='13' font-size='13'%3E📈%3C/text%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
 <style>
 :root {
   --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#c9d1d9;
@@ -375,6 +428,11 @@ __BANNER__
   <h3 class="section-title">最新数据</h3>
   <div class="kpi-grid">
     <div class="kpi">
+      <div class="kpi-label">⭐ Anthropic / OpenAI SDK 比值</div>
+      <div class="kpi-value" style="color:var(--good)">__SDK_RATIO__</div>
+      <div class="kpi-sub">不受 Codex 分发口径变更影响 · 周比值</div>
+    </div>
+    <div class="kpi">
       <div class="kpi-label">Claude Code 周 commit</div>
       <div class="kpi-value" style="color:var(--claude)">__C_CLAUDE__</div>
       <div class="kpi-sub __C_CLAUDE_DIR__">__C_CLAUDE_WOW__ · 截至 __C_WEEK__</div>
@@ -385,14 +443,19 @@ __BANNER__
       <div class="kpi-sub __C_CODEX_DIR__">__C_CODEX_WOW__ · 截至 __C_WEEK__</div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">@anthropic-ai/claude-code 周下载</div>
-      <div class="kpi-value" style="color:var(--claude)">__N_CCODE__</div>
-      <div class="kpi-sub __N_CCODE_DIR__">__N_CCODE_WOW__ · 截至 __N_WEEK__</div>
+      <div class="kpi-label">GitHub Stars 周新增（CC vs Codex）</div>
+      <div class="kpi-value" style="color:var(--accent)">__GH_DELTA__</div>
+      <div class="kpi-sub">__GH_TOTALS__</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">OpenRouter 当日 token 总量</div>
       <div class="kpi-value" style="color:var(--accent)">__OR_TOTAL__</div>
       <div class="kpi-sub">截至 __OR_DATE__ · 跨所有模型</div>
+    </div>
+    <div class="kpi" title="演示了 Codex 4/30 之后的 npm 跳变；保留作上下文，但不再作头条">
+      <div class="kpi-label">@anthropic-ai/claude-code 周下载 <span style="color:var(--warn)">⚠</span></div>
+      <div class="kpi-value" style="color:var(--claude)">__N_CCODE__</div>
+      <div class="kpi-sub __N_CCODE_DIR__">__N_CCODE_WOW__ · 截至 __N_WEEK__ · npm 口径变更，仅作参考</div>
     </div>
   </div>
 </section>
@@ -610,7 +673,18 @@ tool_calls           ← agentic 工作量</div></dd>
             ticks:{callback:v=>(v/1e6).toFixed(1)+'M'}},
           x:{title:{display:true,text:'X 轴 · 周结束日（UTC）',color:'#8b949e',font:{size:11}}},
         },
-        plugins:{legend:{position:'bottom',labels:{boxWidth:14,padding:14}}},
+        plugins:{
+          legend:{position:'bottom',labels:{boxWidth:14,padding:14}},
+          annotation:{annotations:{regime:{
+            type:'line',
+            xMin:D.npm.codex_regime_break,xMax:D.npm.codex_regime_break,
+            borderColor:'#f0b400',borderWidth:2,borderDash:[6,4],
+            label:{display:true,
+              content:'Codex 分发口径变更（per-platform binary）',
+              position:'start',color:'#f0b400',backgroundColor:'#0d1117',
+              font:{size:10}}
+          }}},
+        },
       },
     });
   }
@@ -651,12 +725,40 @@ tool_calls           ← agentic 工作量</div></dd>
             return ""
         return "up" if curr >= prev else "down"
 
-    # Build warning banner. Two levels:
+    # Build warning banner. Three levels (concatenated when present):
+    # (R) Codex npm regime break — high priority, visible above OpenRouter notes.
     # (1) ALWAYS show "data freshness" line: the chart cuts off at today-2.
     # (2) If anomaly detector flagged a suspect day, show that prominently.
     suspect = o.get("suspect", [])
     recently_dropped = o.get("recently_dropped", [])
     banner_html = ""
+
+    # Regime-break alert — shown whenever the latest npm week shows precursor
+    # inflation OR is fully post-boundary. Codex npm counts started
+    # inflating the week ending 2026-04-26 (precursor of the 2026-04-30 switch
+    # to per-platform binary distribution; weekly Codex went 3.1M → 5.8M, +82.7% WoW).
+    n_latest = n.get("week_end") or ""
+    PRECURSOR_THRESHOLD = "2026-04-19"
+    if n_latest and n_latest >= PRECURSOR_THRESHOLD:
+        banner_html += (
+            '<div class="banner-warn">'
+            "<h3>⚠ npm 计数口径变更（@openai/codex）</h3>"
+            "<div>2026-04-30 起，<code>@openai/codex</code> 切换为 "
+            "<b>per-platform 二进制分发</b>（79.4MB tarball，每日多次发布）。"
+            "<code>api.npmjs.org/downloads/range</code> 在变更前/后计的"
+            "不是同一个东西：</div>"
+            "<ul>"
+            "<li>变更前：CLI JS 包安装次数（受 CI/CD 缓存倍增）</li>"
+            "<li>变更后：CLI JS + 平台二进制 tarball 各自计入 + 频繁版本"
+            "刷新触发的 CI 重拉，同一用户被 5-50× 放大</li>"
+            "</ul>"
+            "<div>因此 npm 图表在 4/30 处的"
+            "<b>跳变非真实流量爆发</b>。已用 ⚠ 黄色虚线在 npm 主图标注。"
+            "看竞争对比请优先参考 <b>SDK 比值</b>（Anthropic SDK ÷ OpenAI SDK）"
+            "和 <b>GitHub commits</b> — 它们都不受该事件影响。</div>"
+            "</div>"
+        )
+
     if suspect or recently_dropped:
         items = []
         for s in suspect:
@@ -674,7 +776,7 @@ tool_calls           ← agentic 工作量</div></dd>
                 "最近 2 天数字尚未结算 — 默认从图表剔除以避免误显"
                 "下行趋势</li>"
             )
-        banner_html = (
+        banner_html += (
             '<div class="banner-warn">'
             "<h3>⚠ 数据新鲜度声明</h3>"
             "<div>所有日级图表只显示<b>截至前天</b>的数据（today − 2）。"
@@ -684,8 +786,41 @@ tool_calls           ← agentic 工作量</div></dd>
             "</div>"
         )
 
+    # SDK ratio: anthropic-sdk / openai-sdk (last week's npm downloads).
+    sdk_anthropic = n.get("npm_anthropic-sdk") or 0
+    sdk_openai = n.get("npm_openai-sdk") or 0
+    if sdk_anthropic and sdk_openai:
+        sdk_ratio_text = f"{sdk_anthropic / sdk_openai * 100:.0f}%"
+    else:
+        sdk_ratio_text = "—"
+
+    # GitHub stars KPI: weekly delta + current totals.
+    gh = p.get("gh_stars") or {}
+    cc_gh = gh.get("Claude Code") or {}
+    cx_gh = gh.get("Codex") or {}
+    cc_d = cc_gh.get("delta_7d")
+    cx_d = cx_gh.get("delta_7d")
+    if cc_d is not None and cx_d is not None:
+        gh_delta_text = f"+{cc_d:,} vs +{cx_d:,}"
+        gh_totals_text = (
+            f"截至 {cc_gh.get('as_of', '—')} · "
+            f"now {cc_gh.get('stars', 0):,} / {cx_gh.get('stars', 0):,}"
+        )
+    elif cc_gh.get("stars") and cx_gh.get("stars"):
+        gh_delta_text = f"{cc_gh['stars'] / 1000:.1f}K vs {cx_gh['stars'] / 1000:.1f}K"
+        gh_totals_text = (
+            f"截至 {cc_gh.get('as_of', '—')} · 总数 · "
+            "需 7 天积累 JSONL 历史以显示周新增"
+        )
+    else:
+        gh_delta_text = "首次运行"
+        gh_totals_text = "需 ~/.claude/data/github_stars.jsonl 数据"
+
     replacements = {
         "__BANNER__": banner_html,
+        "__SDK_RATIO__": sdk_ratio_text,
+        "__GH_DELTA__": gh_delta_text,
+        "__GH_TOTALS__": gh_totals_text,
         "__GEN__": gen,
         "__C_WEEK__": c.get("week_end") or "—",
         "__N_WEEK__": n.get("week_end") or "—",
